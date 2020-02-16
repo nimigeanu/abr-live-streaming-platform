@@ -1,0 +1,280 @@
+Description: Simple HLS live streaming platform with Adaptive Bitrate
+
+Parameters:
+  InstanceType:
+    Description: Streaming server instance size
+    Type: String
+    Default: t3.nano
+    AllowedValues: [t3.nano, t2.nano, t2.medium]
+
+  UseCDN:
+    Description: If 'yes', HLS streaming will be set up via CDN
+    Type: String
+    Default: "no"
+    AllowedValues: ["yes", "no"]
+
+
+Mappings: 
+  AmiByRegion: 
+    ap-east-1: 
+      "ami": "ami-d26218a3"
+    ap-northeast-1: 
+      "ami": "ami-0d5db3e2a1b98ca94"
+    ap-south-1: 
+      "ami": "ami-0237472cf337d9529"
+    ap-southeast-1: 
+      "ami": "ami-0c199cae95cea87f0"
+    ca-central-1: 
+      "ami": "ami-0dbe45195223e250b"
+    eu-central-1: 
+      "ami": "ami-040a1551f9c9d11ad"
+    eu-north-1: 
+      "ami": "ami-0567220a328fe4fee"
+    eu-west-1: 
+      "ami": "ami-0e41581acd7dedd99"
+    me-south-1: 
+      "ami": "ami-0a7794ed517908686"
+    sa-east-1: 
+      "ami": "ami-0065a65613972a22a"
+    us-east-1: 
+      "ami": "ami-0d5ae5525eb033d0a"
+    us-west-1: 
+      "ami": "ami-00a3e4424e9ab3e56"
+    cn-north-1: 
+      "ami": "ami-01993b4213b4bffb5"
+    cn-northwest-1: 
+      "ami": "ami-01d4e30d4d4952d0f"
+    us-gov-west-1: 
+      "ami": "ami-a76736c6"
+    us-gov-east-1: 
+      "ami": "ami-64a84b15"
+    ap-northeast-2: 
+      "ami": "ami-0f4362c71ffaf7759"
+    ap-southeast-2: 
+      "ami": "ami-0c0483bc96aef8b2f"
+    eu-west-2: 
+      "ami": "ami-00f94dc949fea2adf"
+    us-east-2: 
+      "ami": "ami-0a7f2b5b6b87eaa1b"
+    us-west-2: 
+      "ami": "ami-09c6723c6c24250c9"
+    ap-northeast-3: 
+      "ami": "ami-07672d9af3947230d"
+    eu-west-3: 
+      "ami": "ami-0df03c7641cf41947"
+
+Conditions: 
+  HasCDN: !Equals [ !Ref UseCDN, "yes" ]
+  NoCDN: !Not [Condition: HasCDN]
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.136.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value:  !Join ['', [!Ref "AWS::StackName", "-VPC" ]]
+   
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    DependsOn: VPC
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.136.10.0/24
+      MapPublicIpOnLaunch : true
+      AvailabilityZone: !Select [ 0, !GetAZs ]
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-Public
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value:  !Sub ${AWS::StackName}-Public
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway  
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allows ssh, rtmp and http/s connections to host
+      VpcId:
+        Ref: VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 1935
+        ToPort: 1935
+        CidrIp: 0.0.0.0/0
+
+  Server:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !FindInMap [AmiByRegion, !Ref "AWS::Region", "ami"]
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PublicSubnet
+      KeyName: wpstream
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      UserData:
+        "Fn::Base64": !Sub |
+          #!/bin/bash -x
+          
+          apt-get update
+          git clone https://github.com/sergey-dryabzhinsky/nginx-rtmp-module.git
+          apt-get --assume-yes install build-essential libpcre3 libpcre3-dev libssl-dev zlib1g-dev ffmpeg
+          wget http://nginx.org/download/nginx-1.17.8.tar.gz
+          tar -xf nginx-1.17.8.tar.gz
+          cd nginx-1.17.8
+          ./configure --with-http_ssl_module --add-module=../nginx-rtmp-module
+          make -j 1
+          sudo make install
+          #curl https://lostshadow.s3.amazonaws.com/abr-live-streaming-platform/nginx.conf > /usr/local/nginx/conf/nginx.conf
+          echo "
+            worker_processes  auto;
+            events {
+                worker_connections  1024;
+            }
+
+            rtmp {
+                server {
+                    listen 1935;
+                    chunk_size 4000;
+                    application live {
+                        live on;
+                        exec_push ffmpeg -i rtmp://127.0.0.1/live/\$name -force_key_frames source -c:v libx264 -b:v 250k -preset veryfast -c:a copy -s 320x180 -pix_fmt yuv420p -f flv rtmp://127.0.0.1/hls/\$name-180p -force_key_frames source -c:v libx264 -b:v 700k -preset veryfast -c:a copy -s 640x360 -pix_fmt yuv420p -f flv rtmp://127.0.0.1/hls/\$name-360p -force_key_frames source -c:v libx264 -b:v 1500k -preset veryfast -c:a copy -s 960x540 -pix_fmt yuv420p -f flv rtmp://127.0.0.1/hls/\$name-540p -c:v copy -c:a copy -f flv rtmp://127.0.0.1/hls/\$name-orig 2>>/var/log/ffmpeg-\$name.log;
+                        allow play 127.0.0.1;
+                        deny play all;
+                    }
+
+                    application hls {
+                        live on;
+                        hls on;
+                        hls_path /mnt/hls/;
+                        deny play all;
+                        hls_variant -180p BANDWIDTH=346000 RESOLUTION=320x180;
+                        hls_variant -360p BANDWIDTH=796000 RESOLUTION=640x360;
+                        hls_variant -540p BANDWIDTH=1596000 RESOLUTION=960x540;
+                        hls_variant -orig BANDWIDTH=2596000 RESOLUTION=1280x720;
+                    }
+                }
+            }
+
+            http {
+                sendfile off;
+                tcp_nopush on;
+                directio 512;
+                default_type application/octet-stream;
+                
+                server {
+                    listen 80;
+                    location / {
+                        add_header 'Cache-Control' 'no-cache';
+                        add_header 'Access-Control-Allow-Origin' '*' always;
+                        add_header 'Access-Control-Expose-Headers' 'Content-Length';
+                        if (\$request_method = 'OPTIONS') {
+                            add_header 'Access-Control-Allow-Origin' '*';
+                            add_header 'Access-Control-Max-Age' 1728000;
+                            add_header 'Content-Type' 'text/plain charset=UTF-8';
+                            add_header 'Content-Length' 0;
+                            return 204;
+                        }
+                        types {
+                            application/dash+xml mpd;
+                            application/vnd.apple.mpegurl m3u8;
+                            video/mp2t ts;
+                        }
+                        root /mnt/;
+                    }
+                }
+            }
+          " > /usr/local/nginx/conf/nginx.conf
+          /usr/local/nginx/sbin/nginx
+
+      Tags: 
+        - 
+          Key: "Name"
+          Value: !Sub "${AWS::StackName}-Server"
+
+  CDN:
+    Type: "AWS::CloudFront::Distribution"
+    Condition: HasCDN
+    Properties:
+      DistributionConfig:
+        Origins:
+          - DomainName: !GetAtt Server.PublicDnsName
+            Id: defaultOrigin
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+        Enabled: 'true'
+        DefaultCacheBehavior:
+          AllowedMethods:
+          - GET
+          - HEAD
+          - OPTIONS
+          TargetOriginId: defaultOrigin
+          ForwardedValues:
+            QueryString: 'false'
+            Cookies:
+              Forward: none
+            Headers:
+              - Origin
+              - Access-Control-Request-Method
+              - Access-Control-Request-Headers
+          ViewerProtocolPolicy: allow-all
+        PriceClass: PriceClass_100
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: 'true'
+
+
+
+Outputs:
+  IngressUrl:
+    Description: RTMP URL to publish to
+    Value: !Sub 
+      - rtmp://${publicIp}/live/stream001
+      - { publicIp: !GetAtt Server.PublicIp }
+  PlaybackUrl:
+    Description: HLS URL of the playback stream
+    Condition: NoCDN
+    Value: !Sub 
+      - http://${publicIp}/hls/stream001.m3u8
+      - { publicIp: !GetAtt Server.PublicIp }
+  CDNPlaybackUrl:
+    Description: HLS URL of the playback stream
+    Condition: HasCDN
+    Value: !Sub 
+      - https://${cdnDomain}/hls/stream001.m3u8
+      - { cdnDomain: !GetAtt CDN.DomainName }
