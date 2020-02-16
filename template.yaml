@@ -5,7 +5,7 @@ Parameters:
     Description: Streaming server instance size
     Type: String
     Default: t3.nano
-    AllowedValues: [t3.nano, t2.nano, t2.medium]
+    AllowedValues: [t3.nano, t2.nano, t3.micro, t2.micro, t2.medium]
 
   UseCDN:
     Description: If 'yes', HLS streaming will be set up via CDN
